@@ -9,20 +9,61 @@ st.set_page_config(
 
 # --- 1. CONFIGURACIÓN DE CONEXIÓN A SUPABASE ---
 try:
+  # Intentamos leer de st.secrets (tanto local como en la nube)
   supabase_url = st.secrets["supabase"]["url"]
   supabase_key = st.secrets["supabase"]["key"]
+except Exception:
+  # Si falla el secrets.toml, ponemos los valores directos para que puedas seguir probando
+  supabase_url = "https://dqknwcocdpcnnhumtntv.supabase.co"
+  supabase_key = "sb_publishable_p_t8Ut4iU02WEflHZZRigQ_g11xnG4z"
+
+try:
   supabase = create_client(supabase_url, supabase_key)
 except Exception as e:
-  st.error(
-      "⚠️ Error de configuración: Faltan las credenciales de Supabase en"
-      " secrets.toml"
-  )
+  st.error(f"⚠️ Error al conectar con Supabase: {e}")
   supabase = None
 
+# --- 2. CONTROL DE AUTENTICACIÓN (SUPABASE AUTH) ---
+if "user" not in st.session_state:
+  st.session_state.user = None
 
-# --- 2. FUNCIÓN PARA OBTENER CONFIGURACIÓN DEL CLIENTE ---
+if st.session_state.user is None:
+  st.subheader("🔐 Iniciar Sesión - Comex BI")
+  email = st.text_input("Correo electrónico")
+  password = st.text_input("Contraseña", type="password")
+
+  if st.button("Entrar"):
+    try:
+      res = supabase.auth.sign_in_with_password(
+          {"email": email, "password": password}
+      )
+      st.session_state.user = res.user
+
+      # --- CONSULTAR LA EMPRESA DEL USUARIO ---
+      user_email = st.session_state.user.email
+      response = (
+          supabase.table("user_profiles")
+          .select("empresa")
+          .eq("email", user_email)
+          .execute()
+      )
+
+      if response.data and len(response.data) > 0:
+        st.session_state.empresa_usuario = response.data[0]["empresa"]
+      else:
+        st.session_state.empresa_usuario = "General"
+      # ----------------------------------------
+
+      st.success("¡Ingreso exitoso!")
+      st.rerun()
+    except Exception as e:
+      st.error(f"Error al iniciar sesión: Verificá tus datos.")
+
+  st.stop()
+  
+# --- 3. FUNCIÓN PARA OBTENER CONFIGURACIÓN DEL CLIENTE ---
 def obtener_configuracion_cliente():
-  if supabase is None:
+  if supabase is None or "empresa_usuario" not in st.session_state:
     return {
         "empresa_nombre": "Empresa Demo",
         "ver_modulo_financiero": True,
@@ -32,26 +73,56 @@ def obtener_configuracion_cliente():
     }
 
   try:
-    response = supabase.table("configuracion_cliente").select("*").execute()
+    # Buscamos la configuración filtrando por la empresa del usuario logueado
+    empresa_actual = st.session_state.empresa_usuario
+    response = (
+        supabase.table("configuracion_cliente")
+        .select("*")
+        .eq("empresa_nombre", empresa_actual)
+        .execute()
+    )
     if response.data and len(response.data) > 0:
       return response.data[0]
   except Exception:
     pass
 
   return {
-      "empresa_nombre": "Mi Empresa Comex",
+      "empresa_nombre": st.session_state.get(
+          "empresa_usuario", "Mi Empresa Comex"
+      ),
       "ver_modulo_financiero": True,
       "ver_modulo_logistico": True,
       "ver_simulador": True,
       "alerta_margen_limite": 15.0,
   }
-
-
+  
 config_cliente = obtener_configuracion_cliente()
 
 st.title(f"📊 Comex BI — {config_cliente.get('empresa_nombre', 'Plataforma')}")
 
-# --- 3. MÓDULO DE CARGA Y MAPEO DINÁMICO ---
+# --- CARGAR DATOS DESDE SUPABASE SI NO HAY ARCHIVO SUBIDO ---
+if (
+    "df_comex" not in st.session_state
+    and supabase is not None
+    and "empresa_usuario" in st.session_state
+):
+  try:
+    empresa_actual = st.session_state.empresa_usuario
+    # Si en tu tabla 'datos_comex' tenés una columna 'empresa', la filtramos acá:
+    response = (
+        supabase.table("datos_comex")
+        .select("*")
+        .eq("empresa", empresa_actual)
+        .execute()
+    )
+    if response.data:
+      df_remoto = pd.DataFrame(response.data)
+      st.session_state["df_comex"] = df_remoto
+  except Exception:
+    pass
+
+
+# --- 4. MÓDULO DE CARGA Y MAPEO DINÁMICO ---
 st.sidebar.header("📁 Gestión de Datos")
 archivo_subido = st.sidebar.file_uploader(
     "Subir Excel de la Empresa", type=["xlsx", "xls"]
@@ -189,7 +260,7 @@ if archivo_subido is not None:
     st.session_state["df_comex"] = df_estandarizado
     st.rerun()
 
-# --- 4. DASHBOARD Y VISUALIZACIÓN DE DATOS (SI YA HAY DATOS CARGADOS) ---
+# --- 5. DASHBOARD Y VISUALIZACIÓN DE DATOS (SI YA HAY DATOS CARGADOS) ---
 if "df_comex" in st.session_state:
   df = st.session_state["df_comex"]
 
