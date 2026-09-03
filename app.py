@@ -1,208 +1,302 @@
-import io
+from datetime import datetime
 import pandas as pd
+from supabase import create_client
 import streamlit as st
-from sqlalchemy import text
 
-# Configuración de la página
 st.set_page_config(
-    page_title="Sistema de Inteligencia Comex",
-    page_icon="🚢",
-    layout="wide",
+    page_title="Comex BI - Sistema Inteligente", layout="wide"
 )
 
-CLAVE_CORRECTA = "comex2026"
-
-# ---------------------------------------------------------
-# 1. CONEXIÓN A POSTGRESQL (SUPABASE)
-# ---------------------------------------------------------
-# Streamlit busca la URL definida en secrets.toml automáticamente
-conn = st.connection("postgres", type="sql")
-
-def inicializar_bd():
-  """Crea la tabla en PostgreSQL si no existe y carga datos iniciales."""
-  with conn.session as session:
-    session.execute(
-        text("""
-            CREATE TABLE IF NOT EXISTS importaciones (
-                id SERIAL PRIMARY KEY,
-                fecha TEXT,
-                producto TEXT,
-                pais_origen TEXT,
-                valor_fob NUMERIC,
-                flete NUMERIC,
-                aduana TEXT
-            );
-        """)
-    )
-
-    # Verificar si está vacía
-    res = session.execute(
-        text("SELECT COUNT(*) FROM importaciones;")
-    ).fetchone()[0]
-    if res == 0:
-      session.execute(
-          text("""
-                INSERT INTO importaciones (fecha, producto, pais_origen, valor_fob, flete, aduana)
-                VALUES 
-                ('2026-01-10', 'Laptops', 'China', 95000.0, 4200.0, 'Buenos Aires'),
-                ('2026-01-12', 'Monitores', 'China', 45000.0, 3500.0, 'Buenos Aires'),
-                ('2026-01-15', 'Teclados', 'Vietnam', 12000.0, 1100.0, 'Córdoba'),
-                ('2026-01-18', 'Laptops', 'EEUU', 80000.0, 2000.0, 'Ezeiza'),
-                ('2026-01-20', 'Monitores', 'EEUU', 30000.0, 1800.0, 'Buenos Aires'),
-                ('2026-01-22', 'Teclados', 'China', 15000.0, 1200.0, 'Mendoza'),
-                ('2026-01-25', 'Celulares', 'China', 120000.0, 5000.0, 'Ezeiza');
-            """)
-      )
-    session.commit()
-
-
-# Creamos la tabla en Supabase si es la primera vez
-inicializar_bd()
-
-
-# ---------------------------------------------------------
-# 2. FUNCIONES DE APOYO
-# ---------------------------------------------------------
-def convertir_df_a_excel(df_exportar):
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df_exportar.to_excel(writer, index=False, sheet_name="Reporte_Comex")
-  return output.getvalue()
-
-
-# ---------------------------------------------------------
-# 3. CONTROL DE ACCESO (LOGIN)
-# ---------------------------------------------------------
-if "autenticado" not in st.session_state:
-  st.session_state["autenticado"] = False
-
-if not st.session_state["autenticado"]:
-  st.title("🔒 Sistema de Comercio Exterior")
-  st.subheader("Ingrese su clave de acceso")
-
-  clave = st.text_input("Contraseña:", type="password")
-  if st.button("Ingresar"):
-    if clave == CLAVE_CORRECTA:
-      st.session_state["autenticado"] = True
-      st.rerun()
-    else:
-      st.error("❌ Contraseña incorrecta")
-  st.stop()
-
-# ---------------------------------------------------------
-# 4. MENÚ Y NAVEGACIÓN LATERAL
-# ---------------------------------------------------------
-st.sidebar.title("🚢 Navegación")
-opcion_menu = st.sidebar.radio(
-    "Ir a:", ["📊 Tablero Principal", "➕ Cargar Nuevo Registro"]
-)
-
-if st.sidebar.button("Cerrar Sesión"):
-  st.session_state["autenticado"] = False
-  st.rerun()
-
-# ---------------------------------------------------------
-# VISTA 1: TABLERO PRINCIPAL
-# ---------------------------------------------------------
-if opcion_menu == "📊 Tablero Principal":
-  st.title("📊 Monitor de Inteligencia Comercial (Supabase)")
-
-  # Consulta dinámica de productos disponibles con conn.query
-  df_prods = conn.query(
-      "SELECT DISTINCT producto FROM importaciones;", ttl="1m"
+# --- 1. CONFIGURACIÓN DE CONEXIÓN A SUPABASE ---
+try:
+  supabase_url = st.secrets["supabase"]["url"]
+  supabase_key = st.secrets["supabase"]["key"]
+  supabase = create_client(supabase_url, supabase_key)
+except Exception as e:
+  st.error(
+      "⚠️ Error de configuración: Faltan las credenciales de Supabase en"
+      " secrets.toml"
   )
-  lista_productos = ["Todos"] + list(df_prods["producto"].dropna().unique())
+  supabase = None
 
-  st.sidebar.divider()
-  st.sidebar.header("🔍 Filtros de Búsqueda")
-  prod_sel = st.sidebar.selectbox("Producto:", lista_productos)
 
-  # Consultas según filtro
-  if prod_sel == "Todos":
-    df_datos = conn.query("SELECT * FROM importaciones;", ttl="1m")
-  else:
-    df_datos = conn.query(
-        "SELECT * FROM importaciones WHERE producto = :prod;",
-        params={"prod": prod_sel},
-        ttl="1m",
-    )
+# --- 2. FUNCIÓN PARA OBTENER CONFIGURACIÓN DEL CLIENTE ---
+def obtener_configuracion_cliente():
+  if supabase is None:
+    return {
+        "empresa_nombre": "Empresa Demo",
+        "ver_modulo_financiero": True,
+        "ver_modulo_logistico": True,
+        "ver_simulador": True,
+        "alerta_margen_limite": 15.0,
+    }
 
-  # Métricas
-  col1, col2, col3 = st.columns(3)
-  total_fob = df_datos["valor_fob"].sum() if not df_datos.empty else 0
-  total_flete = df_datos["flete"].sum() if not df_datos.empty else 0
+  try:
+    response = supabase.table("configuracion_cliente").select("*").execute()
+    if response.data and len(response.data) > 0:
+      return response.data[0]
+  except Exception:
+    pass
 
-  col1.metric("Total Importado (FOB)", f"${total_fob:,.0f} USD")
-  col2.metric("Total Fletes", f"${total_flete:,.0f} USD")
-  col3.metric("Operaciones Encontradas", len(df_datos))
+  return {
+      "empresa_nombre": "Mi Empresa Comex",
+      "ver_modulo_financiero": True,
+      "ver_modulo_logistico": True,
+      "ver_simulador": True,
+      "alerta_margen_limite": 15.0,
+  }
+
+
+config_cliente = obtener_configuracion_cliente()
+
+st.title(f"📊 Comex BI — {config_cliente.get('empresa_nombre', 'Plataforma')}")
+
+# --- 3. MÓDULO DE CARGA Y MAPEO DINÁMICO ---
+st.sidebar.header("📁 Gestión de Datos")
+archivo_subido = st.sidebar.file_uploader(
+    "Subir Excel de la Empresa", type=["xlsx", "xls"]
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("⚙️ Configuración Activa")
+st.sidebar.text(
+    f"Módulo Financiero: {'✅' if config_cliente.get('ver_modulo_financiero') else '❌'}"
+)
+st.sidebar.text(
+    f"Módulo Logístico: {'✅' if config_cliente.get('ver_modulo_logistico') else '❌'}"
+)
+st.sidebar.text(
+    f"Simulador: {'✅' if config_cliente.get('ver_simulador') else '❌'}"
+)
+
+# Si el usuario sube un archivo nuevo, procesamos el mapeo
+if archivo_subido is not None:
+  df_original = pd.read_excel(archivo_subido)
+
+  st.subheader("1. Vista Previa del Archivo Original")
+  st.dataframe(df_original.head(), use_container_width=True)
 
   st.divider()
+  st.subheader("2. Adaptación y Mapeo de Columnas")
+  st.info(
+      "El sistema detectó las siguientes columnas en tu archivo. Por favor,"
+      " vinculalas con los estándares del sistema:"
+  )
 
-  if not df_datos.empty:
-    st.subheader("Importaciones por País de Origen")
-    st.bar_chart(df_datos, x="pais_origen", y="valor_fob")
+  columnas_excel = df_original.columns.tolist()
 
-    st.subheader("Detalle de Registros")
-    st.dataframe(df_datos, use_container_width=True)
 
-    st.download_button(
-        label="📥 Exportar consulta actual a Excel",
-        data=convertir_df_a_excel(df_datos),
-        file_name="reporte_comex_supabase.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  def buscar_sugerencia(lista, posibles_nombres):
+    for col in lista:
+      if any(p in col.lower() for p in posibles_nombres):
+        return col
+    return lista[0] if lista else None
+
+
+  c1, c2 = st.columns(2)
+
+  with c1:
+    col_fecha = st.selectbox(
+        "Columna de Fecha:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(columnas_excel, ["fecha", "date", "f."])
         ),
     )
-  else:
-    st.warning("No se encontraron registros con los filtros seleccionados.")
-
-# ---------------------------------------------------------
-# VISTA 2: FORMULARIO PARA CARGAR NUEVO REGISTRO
-# ---------------------------------------------------------
-elif opcion_menu == "➕ Cargar Nuevo Registro":
-  st.title("➕ Registrar Nueva Importación en la Nube")
-
-  with st.form("form_registro", clear_on_submit=True):
-    col_a, col_b = st.columns(2)
-
-    fecha_inp = col_a.date_input("Fecha de Operación")
-    producto_inp = col_a.text_input("Producto (ej: Monitores)")
-    pais_inp = col_a.text_input("País de Origen (ej: China)")
-
-    fob_inp = col_b.number_input(
-        "Valor FOB (USD)", min_value=0.0, step=500.0, format="%.2f"
+    col_producto = st.selectbox(
+        "Columna de Producto / Descripción:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(
+                columnas_excel, ["producto", "item", "descripcion", "sku"]
+            )
+        ),
     )
-    flete_inp = col_b.number_input(
-        "Flete (USD)", min_value=0.0, step=100.0, format="%.2f"
+    col_cantidad = st.selectbox(
+        "Columna de Cantidad:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(columnas_excel, ["cantidad", "cant", "qty"])
+        ),
     )
-    aduana_inp = col_b.text_input("Aduana de Ingreso (ej: Buenos Aires)")
 
-    enviado = st.form_submit_button("Guardar en Supabase")
+  with c2:
+    col_valor = st.selectbox(
+        "Columna de Valor / FOB:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(columnas_excel, ["fob", "valor", "precio", "usd"])
+        ),
+    )
+    col_proveedor = st.selectbox(
+        "Columna de Proveedor:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(
+                columnas_excel, ["proveedor", "supplier", "vendor"]
+            )
+        ),
+    )
+    col_destino = st.selectbox(
+        "Columna de Destino / País:",
+        columnas_excel,
+        index=columnas_excel.index(
+            buscar_sugerencia(columnas_excel, ["destino", "pais", "country"])
+        ),
+    )
 
-    if enviado:
-      if not producto_inp or not pais_inp:
-        st.error(
-            "⚠️ Por favor completá al menos el nombre del producto y el país."
-        )
-      else:
-        with conn.session as session:
-          session.execute(
-              text("""
-                        INSERT INTO importaciones (fecha, producto, pais_origen, valor_fob, flete, aduana)
-                        VALUES (:fecha, :producto, :pais, :fob, :flete, :aduana);
-                    """),
-              {
-                  "fecha": str(fecha_inp),
-                  "producto": producto_inp,
-                  "pais": pais_inp,
-                  "fob": fob_inp,
-                  "flete": flete_inp,
-                  "aduana": aduana_inp,
-              },
+  if st.button("🚀 Procesar y Guardar en Supabase", type="primary"):
+    df_estandarizado = pd.DataFrame()
+    df_estandarizado["fecha"] = pd.to_datetime(
+        df_original[col_fecha], errors="coerce"
+    )
+    df_estandarizado["producto"] = df_original[col_producto].astype(str)
+    df_estandarizado["cantidad"] = pd.to_numeric(
+        df_original[col_cantidad], errors="coerce"
+    ).fillna(0)
+    df_estandarizado["valor_fob"] = pd.to_numeric(
+        df_original[col_valor], errors="coerce"
+    ).fillna(0)
+    df_estandarizado["proveedor"] = df_original[col_proveedor].astype(str)
+    df_estandarizado["destino"] = df_original[col_destino].astype(str)
+    df_estandarizado["costo_logistico"] = 0.0
+
+    # Guardamos en Supabase
+    if supabase is not None:
+      try:
+        registros = []
+        for _, row in df_estandarizado.iterrows():
+          fecha_str = (
+              row["fecha"].strftime("%Y-%m-%d")
+              if pd.notnull(row["fecha"])
+              else None
           )
-          session.commit()
+          registros.append({
+              "fecha": fecha_str,
+              "producto": row["producto"],
+              "cantidad": float(row["cantidad"]),
+              "valor_fob": float(row["valor_fob"]),
+              "destino": row["destino"],
+              "proveedor": row["proveedor"],
+              "costo_logistico": float(row["costo_logistico"]),
+          })
+        supabase.table("datos_comex").insert(registros).execute()
+        st.success("¡Datos guardados y sincronizados en Supabase!")
+      except Exception as e:
+        st.error(f"Error al guardar en la base de datos: {e}")
 
-        st.cache_data.clear()
-        st.success(
-            f"✅ Registro guardado con éxito en Supabase para '{producto_inp}'."
+    # Guardamos en sesión
+    st.session_state["df_comex"] = df_estandarizado
+    st.rerun()
+
+# --- 4. DASHBOARD Y VISUALIZACIÓN DE DATOS (SI YA HAY DATOS CARGADOS) ---
+if "df_comex" in st.session_state:
+  df = st.session_state["df_comex"]
+
+  st.divider()
+  st.subheader("📈 Tablero de Control y Analítica")
+
+  # Filtro de fechas en barra lateral
+  st.sidebar.divider()
+  st.sidebar.subheader("📅 Filtrar por Período")
+
+  df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+  min_f = (
+      df["fecha"].min().date()
+      if pd.notnull(df["fecha"].min())
+      else datetime.today().date()
+  )
+  max_f = (
+      df["fecha"].max().date()
+      if pd.notnull(df["fecha"].max())
+      else datetime.today().date()
+  )
+
+  rango_fechas = st.sidebar.date_input(
+      "Rango de Fechas", value=(min_f, max_f), min_value=min_f, max_value=max_f
+  )
+
+  if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
+    inicio, fin = rango_fechas
+    df_filtrado = df[
+        (df["fecha"].dt.date >= inicio) & (df["fecha"].dt.date <= fin)
+    ]
+  else:
+    df_filtrado = df
+
+  # Construcción de solapas dinámicas según configuración de Supabase
+  nombres_solapas = []
+  if config_cliente.get("ver_modulo_financiero", True):
+    nombres_solapas.append("📊 Resumen Ejecutivo (KPIs)")
+  if config_cliente.get("ver_modulo_logistico", True):
+    nombres_solapas.append("💰 Costos y Proveedores")
+  if config_cliente.get("ver_simulador", True):
+    nombres_solapas.append("🎛️ Simulador What-If")
+
+  if nombres_solapas:
+    solapas = st.tabs(nombres_solapas)
+    indice_tab = 0
+
+    if config_cliente.get("ver_modulo_financiero", True):
+      with solapas[indice_tab]:
+        st.subheader("Indicadores Clave del Período")
+        col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+
+        total_fob = df_filtrado["valor_fob"].sum()
+        total_operaciones = len(df_filtrado)
+        cantidad_total = df_filtrado["cantidad"].sum()
+        ticket_promedio = (
+            total_fob / total_operaciones if total_operaciones > 0 else 0
         )
+
+        col_kpi1.metric("Gasto Total FOB", f"${total_fob:,.2f}")
+        col_kpi2.metric("Total Operaciones", f"{total_operaciones:,}")
+        col_kpi3.metric("Unidades Movidas", f"{cantidad_total:,.0f}")
+        col_kpi4.metric("Ticket Promedio", f"${ticket_promedio:,.2f}")
+
+        st.markdown("---")
+        st.dataframe(df_filtrado, use_container_width=True)
+      indice_tab += 1
+
+    if config_cliente.get("ver_modulo_logistico", True):
+      with solapas[indice_tab]:
+        st.subheader("Análisis de Proveedores y Destinos")
+        col_l1, col_l2 = st.columns(2)
+
+        with col_l1:
+          st.markdown("**Gasto por Proveedor**")
+          if "proveedor" in df_filtrado.columns:
+            prov_gasto = (
+                df_filtrado.groupby("proveedor")["valor_fob"]
+                .sum()
+                .reset_index()
+            )
+            st.bar_chart(prov_gasto.set_index("proveedor"))
+
+        with col_l2:
+          st.markdown("**Volumen por Destino / País**")
+          if "destino" in df_filtrado.columns:
+            dest_gasto = (
+                df_filtrado.groupby("destino")["valor_fob"].sum().reset_index()
+            )
+            st.bar_chart(dest_gasto.set_index("destino"))
+      indice_tab += 1
+
+    if config_cliente.get("ver_simulador", True):
+      with solapas[indice_tab]:
+        st.subheader("Simulador de Impacto Logístico y Cambiario")
+        st.info("Mové los controles para simular variaciones en los costos.")
+        total_fob_act = df_filtrado["valor_fob"].sum()
+        porcentaje_flete = st.slider(
+            "Variación estimada de Fletes / Costos (%)", -20, 50, 0
+        )
+        fob_simulado = total_fob_act * (1 + porcentaje_flete / 100)
+        st.metric(
+            "Gasto Total Simulado",
+            f"${fob_simulado:,.2f}",
+            delta=f"{porcentaje_flete}%",
+        )
+      indice_tab += 1
+
+elif archivo_subido is None:
+  st.warning("⚠️ Por favor, subí un archivo Excel en la barra lateral para comenzar.")
